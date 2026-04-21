@@ -1,0 +1,21 @@
+{
+  "name": "boss-edi-connector",
+  "version": "1.0.0",
+  "description": "FEMA/GEX EDI Connector for BusinessOS - handles EDI 850/856/997",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-x12": "^4.3.0",
+    "nodemailer": "^6.9.13",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
