@@ -4,18 +4,24 @@ const db = require('../db');
 
 async function parse850(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
-  const parser = new X12Parser(true);
+  const parser = new X12Parser();
   const interchange = parser.parse(raw);
 
   for (const group of interchange.functionalGroups) {
     for (const txn of group.transactions) {
 
-      // BEG segment — order type and DO number
-      const beg = txn.segments.find(s => s.tag === 'BEG');
+      const segments = txn.segments;
+
+      // Helper to find segment and get element value
+      const findSeg = (tag) => segments.find(s => s.tag === tag);
+      const findSegs = (tag) => segments.filter(s => s.tag === tag);
+      const getVal = (seg, idx) => seg && seg.elements && seg.elements[idx - 1] ? seg.elements[idx - 1].value : null;
+
+      // BEG segment
+      const beg = findSeg('BEG');
       const orderTypeCodes = { '00': 'new', '05': 'update', '01': 'cancel' };
-      const orderType = orderTypeCodes[beg?.valueOf('BEG01')] || 'unknown';
-      const doNumber = beg?.valueOf('BEG03');
-      const orderDate = beg?.valueOf('BEG05');
+      const orderType = orderTypeCodes[getVal(beg, 1)] || 'unknown';
+      const doNumber = getVal(beg, 3);
 
       if (!doNumber) {
         console.error('❌ No DO number found in 850');
@@ -25,27 +31,38 @@ async function parse850(filePath) {
       console.log(`📦 DO: ${doNumber} | Type: ${orderType}`);
 
       // REF segments
-      const refs = txn.segments.filter(s => s.tag === 'REF');
-      const fundCite = refs.find(r => r.valueOf('REF01') === 'FG')?.valueOf('REF02');
-      const fundDocControl = refs.find(r => r.valueOf('REF01') === '93')?.valueOf('REF02');
-      const rrfNumber = refs.find(r => r.valueOf('REF01') === 'W4')?.valueOf('REF02');
-      const status = refs.find(r => r.valueOf('REF01') === 'ACC')?.valueOf('REF02');
+      const refs = findSegs('REF');
+      const getRef = (qualifier) => {
+        const seg = refs.find(r => getVal(r, 1) === qualifier);
+        return getVal(seg, 2);
+      };
+      const fundCite = getRef('FG');
+      const fundDocControl = getRef('93');
+      const rrfNumber = getRef('W4');
+      const status = getRef('ACC');
 
       // DTM segments
-      const dtms = txn.segments.filter(s => s.tag === 'DTM');
-      const reqDelivery = dtms.find(d => d.valueOf('DTM01') === '996')?.valueOf('DTM02');
-      const latestArrival = dtms.find(d => d.valueOf('DTM01') === '376')?.valueOf('DTM02');
+      const dtms = findSegs('DTM');
+      const getDtm = (qualifier) => {
+        const seg = dtms.find(d => getVal(d, 1) === qualifier);
+        return getVal(seg, 2);
+      };
+      const reqDelivery = getDtm('996');
+      const latestArrival = getDtm('376');
 
       // N1 party loops
-      const n1s = txn.segments.filter(s => s.tag === 'N1');
-      const originFacility = n1s.find(n => n.valueOf('N101') === 'OT')?.valueOf('N102');
-      const destFacility = n1s.find(n => n.valueOf('N101') === 'DT')?.valueOf('N102');
+      const n1s = findSegs('N1');
+      const getN1 = (qualifier) => {
+        const seg = n1s.find(n => getVal(n, 1) === qualifier);
+        return getVal(seg, 2);
+      };
+      const originFacility = getN1('OT');
+      const destFacility = getN1('DT');
 
-      // N3/N4 addresses
-      const n3s = txn.segments.filter(s => s.tag === 'N3');
-      const n4s = txn.segments.filter(s => s.tag === 'N4');
-      const originAddress = n3s[0] ? `${n3s[0].valueOf('N301')} ${n3s[0].valueOf('N302') || ''}`.trim() : null;
-      const destAddress = n3s[1] ? `${n3s[1].valueOf('N301')} ${n3s[1].valueOf('N302') || ''}`.trim() : null;
+      // N3 address lines
+      const n3s = findSegs('N3');
+      const originAddress = n3s[0] ? getVal(n3s[0], 1) : null;
+      const destAddress = n3s[1] ? getVal(n3s[1], 1) : null;
 
       // Upsert order
       await db.query(`
@@ -67,13 +84,13 @@ async function parse850(filePath) {
           originFacility, originAddress, destFacility, destAddress]);
 
       // PO1 line items
-      const po1s = txn.segments.filter(s => s.tag === 'PO1');
+      const po1s = findSegs('PO1');
       for (const po1 of po1s) {
-        const lineNum = po1.valueOf('PO101');
-        const qty = po1.valueOf('PO102');
-        const sku = po1.valueOf('PO107');
-        const desc = po1.valueOf('PO109');
-        const productClass = po1.valueOf('PO111');
+        const lineNum = getVal(po1, 1);
+        const qty = getVal(po1, 2);
+        const sku = getVal(po1, 7);
+        const desc = getVal(po1, 9);
+        const productClass = getVal(po1, 11);
 
         await db.query(`
           INSERT INTO order_lines (do_number, line_number, sku, quantity, description, product_class)
@@ -85,8 +102,8 @@ async function parse850(filePath) {
       }
 
       // MSG notes
-      const msgs = txn.segments.filter(s => s.tag === 'MSG');
-      const notes = msgs.map(m => m.valueOf('MSG01')).filter(Boolean).join(' | ');
+      const msgs = findSegs('MSG');
+      const notes = msgs.map(m => getVal(m, 1)).filter(Boolean).join(' | ');
       if (notes) {
         await db.query(`UPDATE orders SET notes = $1 WHERE do_number = $2`, [notes, doNumber]);
       }
