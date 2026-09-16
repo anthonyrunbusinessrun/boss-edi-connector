@@ -86,7 +86,7 @@ router.get('/orders/:doNumber', async (req, res, next) => {
     if (!order.rows.length) return res.status(404).json({ success: false, error: 'Order not found' });
     const [lines, messages, shipments] = await Promise.all([
       db.query('SELECT * FROM order_lines WHERE do_number=$1 ORDER BY line_number', [req.params.doNumber]),
-      db.query(`SELECT id, direction, message_type, status, filename, attempts, error_message, created_at, delivered_at
+      db.query(`SELECT id, direction, message_type, status, do_number, filename, attempts, error_message, created_at, delivered_at
         FROM edi_messages WHERE do_number=$1 ORDER BY created_at DESC`, [req.params.doNumber]),
       db.query('SELECT * FROM shipments WHERE do_number=$1 ORDER BY created_at DESC', [req.params.doNumber]),
     ]);
@@ -225,6 +225,14 @@ router.put('/inventory/:sku', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.delete('/inventory/:sku', async (req, res, next) => {
+  try {
+    const result = await db.query('DELETE FROM inventory_items WHERE sku=$1 RETURNING sku', [req.params.sku]);
+    if (!result.rows.length) return res.status(404).json({ success: false, error: 'Inventory record not found' });
+    res.json({ success: true, deleted: result.rows[0].sku });
+  } catch (error) { next(error); }
+});
+
 router.post('/messages/:id/retry', async (req, res, next) => {
   try {
     const message = await retryMessage(req.params.id);
@@ -244,6 +252,20 @@ router.get('/shipments', async (req, res, next) => {
       GROUP BY s.id, o.requested_delivery, o.destination_address
       ORDER BY s.created_at DESC LIMIT 250`);
     res.json({ success: true, shipments: result.rows, edi856Enabled: config.edi.enable856 });
+  } catch (error) { next(error); }
+});
+
+router.get('/shipments/:asnId', async (req, res, next) => {
+  try {
+    const shipment = await db.query('SELECT * FROM shipments WHERE asn_id=$1', [req.params.asnId]);
+    if (!shipment.rows.length) return res.status(404).json({ success: false, error: 'ASN not found' });
+    const lines = await db.query(`SELECT sl.id, sl.sku, sl.quantity, sl.unit, sl.lot_number,
+      sl.expiration_date, sl.manufacturer, MAX(ol.description) AS description
+      FROM shipment_lines sl
+      LEFT JOIN order_lines ol ON ol.do_number=$2 AND ol.sku=sl.sku
+      WHERE sl.asn_id=$1
+      GROUP BY sl.id ORDER BY sl.id`, [req.params.asnId, shipment.rows[0].do_number]);
+    res.json({ success: true, shipment: shipment.rows[0], lines: lines.rows, edi856Enabled: config.edi.enable856 });
   } catch (error) { next(error); }
 });
 
@@ -280,24 +302,130 @@ router.post('/shipments', async (req, res, next) => {
 router.patch('/shipments/:asnId', async (req, res, next) => {
   try {
     const status = text(req.body.status, 50);
+    const has = key => Object.prototype.hasOwnProperty.call(req.body, key);
     if (status && !SHIPMENT_STATUSES.has(status)) {
       return res.status(400).json({ success: false, error: 'Invalid shipment status' });
     }
     const result = await db.query(`UPDATE shipments SET
-      status=COALESCE($2,status), carrier=COALESCE($3,carrier),
-      tracking_number=COALESCE($4,tracking_number), bol_number=COALESCE($5,bol_number),
-      trailer_number=COALESCE($6,trailer_number), tractor_number=COALESCE($7,tractor_number),
-      ship_date=COALESCE($8, CASE WHEN $2='in_transit' THEN TO_CHAR(CURRENT_DATE,'YYYYMMDD') ELSE ship_date END),
-      eta=COALESCE($9,eta), notes=COALESCE($10,notes),
+      status=COALESCE($2,status),
+      carrier=CASE WHEN $3 THEN $4 ELSE carrier END,
+      tracking_number=CASE WHEN $5 THEN $6 ELSE tracking_number END,
+      bol_number=CASE WHEN $7 THEN $8 ELSE bol_number END,
+      trailer_number=CASE WHEN $9 THEN $10 ELSE trailer_number END,
+      tractor_number=CASE WHEN $11 THEN $12 ELSE tractor_number END,
+      ship_date=CASE WHEN $13 THEN $14 WHEN $2='in_transit' THEN TO_CHAR(CURRENT_DATE,'YYYYMMDD') ELSE ship_date END,
+      eta=CASE WHEN $15 THEN $16 ELSE eta END,
+      notes=CASE WHEN $17 THEN $18 ELSE notes END,
       delivered_at=CASE WHEN $2='delivered' THEN NOW() ELSE delivered_at END,
       updated_at=NOW()
       WHERE asn_id=$1 RETURNING *`, [
-      req.params.asnId, status, text(req.body.carrier), text(req.body.trackingNumber),
-      text(req.body.bolNumber), text(req.body.trailerNumber), text(req.body.tractorNumber),
-      text(req.body.shipDate, 20), text(req.body.eta, 20), text(req.body.notes, 1000),
+      req.params.asnId, status,
+      has('carrier'), text(req.body.carrier),
+      has('trackingNumber'), text(req.body.trackingNumber),
+      has('bolNumber'), text(req.body.bolNumber),
+      has('trailerNumber'), text(req.body.trailerNumber),
+      has('tractorNumber'), text(req.body.tractorNumber),
+      has('shipDate'), text(req.body.shipDate, 20),
+      has('eta'), text(req.body.eta, 20),
+      has('notes'), text(req.body.notes, 1000),
     ]);
     if (!result.rows.length) return res.status(404).json({ success: false, error: 'ASN not found' });
     res.json({ success: true, shipment: result.rows[0] });
+  } catch (error) { next(error); }
+});
+
+router.put('/shipments/:asnId/lines', async (req, res, next) => {
+  let client;
+  try {
+    const lines = Array.isArray(req.body.lines) ? req.body.lines : [];
+    if (!lines.length) return res.status(400).json({ success: false, error: 'At least one shipment line is required' });
+    const normalized = lines.map((line, index) => {
+      const sku = text(line.sku, 100);
+      const amount = quantity(line.quantity, `Line ${index + 1} quantity`);
+      if (!sku || amount <= 0) {
+        const error = new Error(`Line ${index + 1} requires a SKU and a quantity greater than zero`);
+        error.status = 400;
+        throw error;
+      }
+      return {
+        sku,
+        quantity: amount,
+        unit: text(line.unit, 10) || 'EA',
+        lotNumber: text(line.lotNumber, 100),
+        expirationDate: text(line.expirationDate, 20),
+        manufacturer: text(line.manufacturer, 100),
+      };
+    });
+    client = await db.connect();
+    await client.query('BEGIN');
+    const shipment = await client.query('SELECT status FROM shipments WHERE asn_id=$1 FOR UPDATE', [req.params.asnId]);
+    if (!shipment.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'ASN not found' });
+    }
+    if (shipment.rows[0].status !== 'draft') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, error: 'Shipment lines can only be changed while the ASN is a draft' });
+    }
+    await client.query('DELETE FROM shipment_lines WHERE asn_id=$1', [req.params.asnId]);
+    for (const line of normalized) {
+      await client.query(`INSERT INTO shipment_lines
+        (asn_id, sku, quantity, unit, lot_number, expiration_date, manufacturer)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
+        req.params.asnId, line.sku, line.quantity, line.unit,
+        line.lotNumber, line.expirationDate, line.manufacturer,
+      ]);
+    }
+    await client.query('UPDATE shipments SET updated_at=NOW() WHERE asn_id=$1', [req.params.asnId]);
+    await client.query('COMMIT');
+    res.json({ success: true, lines: normalized });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    next(error);
+  } finally { if (client) client.release(); }
+});
+
+router.delete('/shipments/:asnId', async (req, res, next) => {
+  let client;
+  try {
+    client = await db.connect();
+    await client.query('BEGIN');
+    const shipment = await client.query('SELECT asn_id, status FROM shipments WHERE asn_id=$1 FOR UPDATE', [req.params.asnId]);
+    if (!shipment.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'ASN not found' });
+    }
+    if (shipment.rows[0].status !== 'draft') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, error: 'Only draft ASNs can be deleted. Cancel an active shipment instead.' });
+    }
+    await client.query('DELETE FROM shipment_lines WHERE asn_id=$1', [req.params.asnId]);
+    await client.query('DELETE FROM shipments WHERE asn_id=$1', [req.params.asnId]);
+    await client.query('COMMIT');
+    res.json({ success: true, deleted: req.params.asnId });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    next(error);
+  } finally { if (client) client.release(); }
+});
+
+router.post('/shipments/:asnId/send', async (req, res, next) => {
+  try {
+    const shipment = await db.query('SELECT asn_id, status FROM shipments WHERE asn_id=$1', [req.params.asnId]);
+    if (!shipment.rows.length) return res.status(404).json({ success: false, error: 'ASN not found' });
+    if (shipment.rows[0].status === 'draft') return res.status(409).json({
+      success: false,
+      error: 'Mark the ASN ready to ship before sending it',
+    });
+    if (!config.edi.enable856) return res.status(409).json({
+      success: false,
+      error: 'EDI 856 sending is locked until FEMA/GEX approves the implementation guide and certification testing',
+    });
+    if (config.outbound.mode !== 'http' || !config.outbound.url) return res.status(409).json({
+      success: false,
+      error: 'The approved GEX outbound URL and authentication are not configured',
+    });
+    res.status(501).json({ success: false, error: 'The partner-approved 856 map must be installed before transmission can be enabled' });
   } catch (error) { next(error); }
 });
 
