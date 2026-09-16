@@ -166,7 +166,7 @@ router.get('/inventory', async (req, res, next) => {
         GROUP BY sku
       ), shipped AS (
         SELECT sl.sku,
-          SUM(CASE WHEN s.status <> 'cancelled' THEN sl.quantity ELSE 0 END)::numeric AS shipped_quantity
+          SUM(CASE WHEN s.status IN ('in_transit','delivered') THEN sl.quantity ELSE 0 END)::numeric AS shipped_quantity
         FROM shipment_lines sl JOIN shipments s ON s.asn_id=sl.asn_id
         WHERE sl.sku IS NOT NULL AND sl.sku <> ''
         GROUP BY sl.sku
