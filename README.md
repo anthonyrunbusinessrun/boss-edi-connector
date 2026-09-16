@@ -13,6 +13,9 @@ is intentionally not part of this service.
 - X12 997 generation with unique outbound control numbers
 - Durable outbound queue with retries and truthful delivery states
 - Minimal authenticated API for the BusinessOS dashboard
+- Demand-linked inventory ledger with on-hand, allocated, and reorder values
+- Internal shipment tracking from draft through delivery
+- Draft ASN preparation without implying an approved 856 transmission
 - 856 dispatch disabled until FEMA/GEX confirms scope and mapping
 
 This service is an implementation foundation, not evidence of GEX approval.
@@ -35,7 +38,10 @@ The additive schema in `schema.sql` runs automatically at startup.
 - `POST /api/auth/login` - dashboard login
 - `GET /api/dashboard` - counts, connection state, recent messages
 - `GET /api/orders` and `GET /api/orders/:doNumber`
+- `GET /api/inventory` and `PUT /api/inventory/:sku`
+- `GET /api/shipments`, `POST /api/shipments`, and `PATCH /api/shipments/:asnId`
 - `GET /api/messages` and `POST /api/messages/:id/retry`
+- `GET /api/integrations` - partner pathway, document profiles, and onboarding gates
 
 ## Outbound modes
 

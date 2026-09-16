@@ -14,7 +14,7 @@ router.get('/health', async (req, res) => {
   res.status(ready ? 200 : 503).json({
     status: ready ? 'ready' : 'configuration_required',
     service: 'Ray Land BusinessOS EDI Gateway',
-    version: '2.0.0',
+    version: '2.1.0',
     database,
     outboundMode: config.outbound.mode,
     edi856Enabled: config.edi.enable856,
