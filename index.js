@@ -27,7 +27,7 @@ app.get('/', (req, res) => {
   res.json({
     status: 'online',
     service: 'Ray Land BusinessOS EDI Gateway',
-    version: '2.0.0',
+    version: '2.1.0',
     endpoints: {
       inbound_https: '/edi/inbound',
       health: '/edi/health',

@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS shipment_lines (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS inventory_items (
+  sku VARCHAR(100) PRIMARY KEY,
+  description TEXT,
+  unit VARCHAR(10) DEFAULT 'UN',
+  on_hand DECIMAL NOT NULL DEFAULT 0,
+  allocated DECIMAL NOT NULL DEFAULT 0,
+  reorder_point DECIMAL NOT NULL DEFAULT 0,
+  location VARCHAR(100),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS edi_log (
   id SERIAL PRIMARY KEY,
   direction VARCHAR(10),
@@ -112,3 +124,13 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS sender_id VARCHAR(100);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS receiver_id VARCHAR(100);
 ALTER TABLE shipments ADD COLUMN IF NOT EXISTS error_message TEXT;
 ALTER TABLE shipments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS carrier VARCHAR(100);
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS tracking_number VARCHAR(100);
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS bol_number VARCHAR(100);
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE shipments ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_shipments_status_created
+  ON shipments(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shipment_lines_sku
+  ON shipment_lines(sku);
