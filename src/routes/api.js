@@ -108,6 +108,52 @@ router.get('/messages', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.get('/integrations', async (req, res, next) => {
+  try {
+    const [messageCounts, lastInbound, lastOutbound] = await Promise.all([
+      db.query(`SELECT
+        COUNT(*) FILTER (WHERE direction='inbound')::int AS inbound,
+        COUNT(*) FILTER (WHERE direction='outbound')::int AS outbound,
+        COUNT(*) FILTER (WHERE status IN ('failed','rejected'))::int AS exceptions
+        FROM edi_messages`),
+      db.query(`SELECT created_at, status, do_number FROM edi_messages
+        WHERE direction='inbound' ORDER BY created_at DESC LIMIT 1`),
+      db.query(`SELECT created_at, status, do_number FROM edi_messages
+        WHERE direction='outbound' ORDER BY created_at DESC LIMIT 1`),
+    ]);
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    res.json({
+      success: true,
+      summary: messageCounts.rows[0],
+      partner: {
+        code: 'FEMA-GEX', name: 'FEMA through DAAS GEX', environment: 'test onboarding',
+        transport: 'Authenticated HTTPS 443', status: 'partner_testing_required',
+        rayIsaId: config.edi.rayIsaId, rayIsaQualifier: config.edi.rayIsaQualifier,
+        inboundEndpoint: `${baseUrl}/edi/inbound`,
+      },
+      connections: [
+        { id: 'gex-inbound', name: 'GEX inbound gateway', kind: 'Partner HTTPS', direction: 'inbound', status: config.inbound.token ? 'configured' : 'configuration_required', detail: 'Receives X12 over authenticated HTTPS 443', lastActivity: lastInbound.rows[0] || null },
+        { id: 'gex-outbound', name: 'GEX return route', kind: 'Partner HTTPS', direction: 'outbound', status: config.outbound.mode === 'http' && config.outbound.url ? 'configured' : 'awaiting_gex', detail: 'Returns 997 acknowledgments after GEX supplies its approved URL', lastActivity: lastOutbound.rows[0] || null },
+        { id: 'operations-api', name: 'BusinessOS operations API', kind: 'Internal API', direction: 'bidirectional', status: 'configured', detail: 'Orders, inventory, shipments, ASNs, and audit data' },
+        { id: 'erp-wms', name: 'ERP / WMS integration', kind: 'API or flat file', direction: 'bidirectional', status: 'not_configured', detail: 'Available after Ray Land selects the target ERP or warehouse system' },
+      ],
+      documents: [
+        { transaction: '850', name: 'Purchase order', direction: 'inbound', version: '004010', workflow: 'Validate → map → order → 997', status: 'ready_for_partner_test' },
+        { transaction: '997', name: 'Functional acknowledgment', direction: 'outbound', version: '004010', workflow: 'Generate → queue → deliver → audit', status: config.outbound.mode === 'http' ? 'configured' : 'awaiting_return_route' },
+        { transaction: '856', name: 'Advance shipment notice', direction: 'outbound', version: 'Pending guide', workflow: 'Draft → validate → approve → transmit', status: config.edi.enable856 ? 'configured' : 'internal_draft_only' },
+      ],
+      onboarding: [
+        { name: 'Trading-partner agreement', owner: 'Ray Land / FEMA / GEX', status: 'action_required', detail: 'Complete the new Ray Land agreement and connected-partner updates.' },
+        { name: 'Addressing and identifiers', owner: 'DLA EDI Group', status: 'in_progress', detail: `Confirm ISA/GS routing for ${config.edi.rayIsaId}.` },
+        { name: 'Inbound connectivity', owner: 'Ray Land', status: config.inbound.token ? 'ready' : 'action_required', detail: 'HTTPS endpoint, authentication, validation, and duplicate protection.' },
+        { name: 'Document mapping', owner: 'Ray Land / GEX', status: 'in_progress', detail: '850 and 997 implemented locally; partner implementation guide confirmation remains.' },
+        { name: 'Partner certification testing', owner: 'GEX testing team', status: 'not_started', detail: 'Execute approved test cases and capture evidence for each production path.' },
+        { name: 'Production authorization', owner: 'GEX production', status: 'blocked', detail: 'Requires agreements, testing, firewall validation, account setup, and IDG.' },
+      ],
+    });
+  } catch (error) { next(error); }
+});
+
 router.get('/inventory', async (req, res, next) => {
   try {
     const result = await db.query(`

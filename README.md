@@ -41,6 +41,7 @@ The additive schema in `schema.sql` runs automatically at startup.
 - `GET /api/inventory` and `PUT /api/inventory/:sku`
 - `GET /api/shipments`, `POST /api/shipments`, and `PATCH /api/shipments/:asnId`
 - `GET /api/messages` and `POST /api/messages/:id/retry`
+- `GET /api/integrations` - partner pathway, document profiles, and onboarding gates
 
 ## Outbound modes
 
