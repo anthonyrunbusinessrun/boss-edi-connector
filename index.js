@@ -1,45 +1,84 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
+const config = require('./src/config');
+const db = require('./src/db');
+const { migrate } = require('./src/db/migrate');
+const { startOutboundWorker, stopOutboundWorker } = require('./src/services/outbound');
+const { applyCors, applySecurityHeaders } = require('./src/middleware/security');
+
 const app = express();
 
-// ── CORS — allow dashboard and any GEX/AS2 caller ──────────────────────────
+app.disable('x-powered-by');
+if (config.trustProxy) app.set('trust proxy', config.trustProxy);
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Filename, AS2-From, AS2-To, AS2-Version, Message-ID');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  req.requestId = req.get('x-request-id') || crypto.randomUUID();
+  res.setHeader('X-Request-ID', req.requestId);
   next();
 });
+app.use(applySecurityHeaders);
+app.use(applyCors);
 
-// ── Routes ─────────────────────────────────────────────────────────────────
-app.use('/as2', require('./src/as2/as2handler'));
-app.use('/edi', require('./src/as2/receiver'));
-app.use(express.json());
-
-require('./src/watcher/inbox');
-
-app.use('/orders', require('./src/routes/orders'));
-app.use('/shipments', require('./src/routes/shipments'));
+app.use('/edi', require('./src/routes/edi'));
+app.use('/api/auth', express.json({ limit: '16kb' }), require('./src/routes/auth'));
+app.use('/api', express.json({ limit: '256kb' }), require('./src/routes/api'));
 
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    service: 'BusinessOS EDI Connector',
-    version: '1.0.0',
+    service: 'Ray Land BusinessOS EDI Gateway',
+    version: '2.0.0',
     endpoints: {
-      as2:       '/as2',
-      edi_https: '/edi/inbound',
-      health:    '/edi/health',
-      orders:    '/orders',
-      dispatch:  '/shipments/dispatch'
+      inbound_https: '/edi/inbound',
+      health: '/edi/health',
+      login: '/api/auth/login'
     }
   });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log('🚀 BusinessOS EDI Service running on port ' + PORT);
-  console.log('📡 AS2 endpoint:   POST /as2');
-  console.log('📡 HTTPS endpoint: POST /edi/inbound');
-  console.log('❤️  Health check:  GET /edi/health');
+app.use((err, req, res, next) => {
+  const status = err.status || (err.type === 'entity.too.large' ? 413 : 500);
+  console.error(JSON.stringify({
+    level: 'error', requestId: req.requestId, status,
+    message: err.message, stack: config.isProduction ? undefined : err.stack
+  }));
+  if (res.headersSent) return next(err);
+  res.status(status).json({
+    success: false,
+    error: status >= 500 ? 'Internal server error' : err.message,
+    requestId: req.requestId
+  });
 });
+
+let server;
+
+async function start() {
+  await migrate();
+  await db.query('SELECT 1');
+  server = app.listen(config.port, () => {
+    console.log(JSON.stringify({
+      level: 'info', event: 'service_started', port: config.port,
+      environment: config.nodeEnv, outboundMode: config.outbound.mode
+    }));
+  });
+  startOutboundWorker();
+}
+
+async function shutdown(signal) {
+  console.log(JSON.stringify({ level: 'info', event: 'shutdown', signal }));
+  stopOutboundWorker();
+  if (server) await new Promise(resolve => server.close(resolve));
+  await db.end();
+}
+
+if (require.main === module) {
+  start().catch(err => {
+    console.error(JSON.stringify({ level: 'error', event: 'startup_failed', message: err.message }));
+    process.exit(1);
+  });
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => shutdown(signal).finally(() => process.exit(0)));
+  }
+}
+
+module.exports = { app, start };
